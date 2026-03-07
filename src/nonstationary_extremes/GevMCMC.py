@@ -4,12 +4,13 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy.stats import genextreme
 from scipy.linalg import sqrtm
+from scipy.special import logsumexp
 
 from scipy.stats import genextreme as gev
 
 class GevMCMC:
 
-    def __init__(self, data, param_setup, verbose=True):
+    def __init__(self, data, param_setup, upper_limit=None, verbose=True):
 
         """
         This function sets up the data and the model parameters and hyperparameters for fitting a GEV model.
@@ -19,6 +20,7 @@ class GevMCMC:
         """
         
         self.data = data.dropna()
+        self.upper_limit = upper_limit
         self.param_setup = param_setup
         self.verbose = verbose
         self.nT = len(self.data.iloc[:, 0])
@@ -164,85 +166,65 @@ class GevMCMC:
 
         return Mu, Sgm, Xi
         
-    # def log_likelihood(self, params, time_steps, return_pointwise=False):
-    #     """
-    #     This function calculates the log_likelihood of a generalised extreme value distribution
-
-    #     Input (list, list): params which is a list of estimates for the three gev parameters. time_steps is an array of points from 0,1 which is the length of the data.
-
-    #     Output (float): the log_likelihood of a generalised extreme value distribution with the passed in parameters.
-    #     """
-
-    #     tNll = np.zeros([3, 1])
-    #     log_pdf_array = np.zeros([len(self.data), 3])
-
-    #     Mu, Sgm, Xi = self.build_parameter_arrays(params, time_steps)
-
-    #     for iS in range(3):
-
-    #         x = self.data.iloc[:, iS]
-
-    #         # Compute the standardised variable (z)
-    #         z = (x - Mu[:, iS]) / Sgm[:, iS]
-    #         if np.any(1 + Xi[:, iS] * z <= 0):
-    #             if return_pointwise:
-    #                 return np.inf, tNll, None
-    #             else:
-    #                 return np.inf, tNll # Invalid parameters (domain constraint violated)
-
-    #         # Compute the log-likelihood for GEV
-    #         if np.abs(Xi[:, iS]).max() < 1e-6:  # Limiting case as xi -> 0 (Gumbel)
-    #             log_pdf = -np.log(Sgm[:, iS]) - z - np.exp(-z)
-    #         else:  # General case for xi != 0
-    #             t = 1 + Xi[:, iS] * z
-    #             log_pdf = (
-    #                 -np.log(Sgm[:, iS])
-    #                 - (1 / Xi[:, iS] + 1) * np.log1p(Xi[:, iS] * z)
-    #                 - t**(-1 / Xi[:, iS])
-    #             )
-
-    #         # Accumulate the negative log-likelihood
-    #         log_pdf_array[:, iS] = log_pdf
-    #         tNll[iS] = -1 * np.sum(log_pdf)
-        
-    #     total_nll = np.sum(tNll)
-        
-    #     if return_pointwise:
-    #         return total_nll, tNll, log_pdf_array
-    #     else:
-    #         return total_nll, tNll
-
-    def log_likelihood(self, params, time_steps, return_pointwise=False):
+    def log_likelihood(self, params, time_steps, data=None, return_pointwise=False):
         """
-        Vectorized log-likelihood for GEV across all sites (faster version)
-        """
-        data_np = self.data.values  # shape (nT, 3)
-        Mu, Sgm, Xi = self.build_parameter_arrays(params, time_steps)  # each (nT, 3)
+        Compute the (negative) log-likelihood for the GEV distribution.
 
-        # Standardized variable
+        Parameters
+        ----------
+        params : dict or array-like
+            Current parameter values (mu, sigma, xi) used to compute the likelihood.
+        time_steps : array-like
+            The time indices (or covariate time steps) used to build parameter arrays.
+        data : pd.DataFrame or np.ndarray, optional
+            The data to evaluate the likelihood on.
+            If None, defaults to self.data (training data).
+        return_pointwise : bool, optional
+            If True, also return per-observation log-pdf values.
+
+        Returns
+        -------
+        total_nll : float
+            Total negative log-likelihood (scalar).
+        tNll : np.ndarray
+            Per-site total NLL (shape depends on data).
+        log_pdf : np.ndarray, optional
+            Individual log-pdf values (if return_pointwise=True).
+        """
+
+        # Allow custom dataset
+        if data is None:
+            data_np = self.data.values
+        elif isinstance(data, pd.DataFrame):
+            data_np = data.values
+        else:
+            data_np = np.asarray(data)
+        
+        # Build mu, sigma, xi arrays for the provided time steps
+        Mu, Sgm, Xi = self.build_parameter_arrays(params, time_steps)  # shapes match data_np
+
+        # Standardise
         z = (data_np - Mu) / Sgm
         t = 1 + Xi * z
 
-        # Check domain validity
+        # Check domain validity (GEV constraint: t > 0, sigma > 0)
         invalid_mask = (t <= 0) | (Sgm <= 0)
         if np.any(invalid_mask):
             if return_pointwise:
-                return np.inf, np.zeros((3, 1)), None
-            return np.inf, np.zeros((3, 1))
+                return np.inf, np.zeros_like(Mu), None
+            return np.inf, np.zeros_like(Mu)
 
-        # Compute log-pdf for both xi ≈ 0 and xi != 0 in one vectorized form
+        # Compute log-pdf
+        log_pdf = np.empty_like(Mu)
         small_xi_mask = np.abs(Xi) < 1e-6
 
-        # Allocate log_pdf array
-        log_pdf = np.empty_like(Mu)
-
-        # Case 1: xi ≈ 0 (Gumbel limit)
+        # Gumbel limit (ξ ≈ 0)
         if np.any(small_xi_mask):
             z_g = z[small_xi_mask]
             s_g = Sgm[small_xi_mask]
             log_pdf[small_xi_mask] = -np.log(s_g) - z_g - np.exp(-z_g)
 
-        # Case 2: xi != 0
+        # General case (ξ ≠ 0)
         if np.any(~small_xi_mask):
             z_n = z[~small_xi_mask]
             s_n = Sgm[~small_xi_mask]
@@ -261,34 +243,42 @@ class GevMCMC:
             return total_nll, tNll, log_pdf
         else:
             return total_nll, tNll
+        
+    def posterior_predictive_nll(self, test_data, samples, time_steps=None):
+        """
+        Compute posterior predictive negative log-likelihood and log-predictive density.
 
-    
-    # def log_prior(self, params, time_steps):
-    #     """
-    #     This function provides prior constraints on estimated parameters.
+        Returns:
+        nll_pred : float  # = - log p(y_test | posterior)
+        log_pred : float  # =  log p(y_test | posterior)
+        """
+        if time_steps is None:
+            time_steps = np.arange(len(test_data))
 
-    #     Input (list, list): params which is a list of estimates for the three gev parameters. time_steps is an array of points from 0,1 which is the length of the data.
+        if isinstance(samples, np.ndarray) and samples.ndim == 2:
+            sample_list = [np.ravel(samples[i, :]) for i in range(samples.shape[0])]
+        else:
+            raise TypeError("Samples must be a 2D numpy array")
+        sample_list = list(samples)
 
-    #     Output (float): Will return either 0 or -inf depending on the input parameters.
-    #     """
+        n_total = len(sample_list)
 
-    #     # if ACC model, we assign prior to c
-    #     if self.param_structure[3] == 1:
+        loglik_values = np.empty(n_total, dtype=float)
 
-    #         c_vec = [params[2], params[4], params[6]]
+        for i, params in enumerate(sample_list):
+            params_vec = params
 
-    #         if (min(c_vec) <= -0.5 or max(c_vec) >= 10):
-    #             return -np.inf
+            total_nll, _ = self.log_likelihood(params_vec, time_steps, data=test_data)
+            loglik_values[i] = -total_nll  # convert NLL -> log-likelihood
+        
+        # If we get -inf values, then replace with -100
+        loglik_values[np.isneginf(loglik_values)] = -1000
 
-    #     Mu, Sgm, Xi = self.build_parameter_arrays(params, time_steps)
+        log_pred = logsumexp(loglik_values) - np.log(len(loglik_values))
+        nll_pred = -log_pred
 
-    #     for iS in range(3):
-            
-    #         t0=(1+Xi[:, iS]*(self.data.iloc[:, iS] - Mu[:, iS])/Sgm[:, iS])
+        return nll_pred, log_pred, loglik_values
 
-    #         if (min(Sgm[:, iS]) <= 0) or (min(Xi[:, iS]) <= -1) or (max(Xi[:, iS]) > 0.2) or (min(t0) < 0):
-    #             return -np.inf
-    #     return 0
 
     def log_prior(self, params, time_steps):
         """
@@ -308,12 +298,22 @@ class GevMCMC:
 
         t0 = 1 + Xi * (data_np - Mu) / Sgm
 
-        invalid_mask = (
-            (Sgm <= 0) |        # invalid scale
-            (Xi <= -1) |        # too negative shape
-            (Xi > 0.2) |        # too large shape
-            (t0 <= 0)           # domain constraint violated
-        )
+        if self.upper_limit is not None:
+            # This is used only for the cross-validation to avoid out-of-sample observations causing issues
+            invalid_mask = (
+                (Sgm <= 0) |        # invalid scale
+                (Xi <= -1) |        # too negative shape
+                (Xi > 0.2) |        # too large shape
+                (t0 <= 0)  |        # domain constraint violated
+                (Xi <= 0) & ((Mu - Sgm/Xi) < self.upper_limit)
+            )
+        else:
+            invalid_mask = (
+                (Sgm <= 0) |        # invalid scale
+                (Xi <= -1) |        # too negative shape
+                (Xi > 0.2) |        # too large shape
+                (t0 <= 0)           # domain constraint violated
+            )
 
         # If any invalid parameter across any site, reject
         if np.any(invalid_mask):
@@ -390,7 +390,8 @@ class GevMCMC:
                     [
                         t_nloglikelihood,
                         pd.DataFrame(
-                            [tNll.flatten()], columns=[12, 24, 58]  # Assigning correct labels
+                            tNll,
+                            columns=[12, 24, 58]
                         ),
                     ],
                     ignore_index=True,
