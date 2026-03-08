@@ -2,7 +2,7 @@
 
 This repository contains the code, data, and figures supporting the paper:
 
-`Changes in Extreme Temperatures of the Earth's Desert Regions over the Next 100 Years.`
+[Changes in Extreme Temperatures of the Earth's Desert Regions over the Next 100 Years.](https://ygraigarw.github.io/LchEA26_CoupledGEVR.pdf)
 
 The project investigates how extreme near-surface air temperatures (tas) may change in major desert regions over the next century using output from CMIP6 global climate models (GCMs). In particular, the study estimates the change in the 100-year return value of annual temperature extremes between 2025 and 2125.
 
