@@ -184,3 +184,4 @@ Old_paper_latex
 *.ipynb
 *.DS_Store
 *.nc
+.vscode/
